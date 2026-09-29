@@ -121,6 +121,13 @@ h2 { font-size: 1.1rem; line-height: 1.3; margin-bottom: 14px; }
 }
 .usuario-sesion strong { display: block; font-weight: 600; }
 .usuario-sesion span { display: block; color: var(--texto-3); font-size: 0.85rem; margin-bottom: 10px; }
+/* Cerrar sesion es un formulario (POST) con apariencia de enlace */
+.boton-enlace {
+    background: none; border: 0; padding: 0;
+    font: inherit; color: var(--acento); cursor: pointer;
+}
+.boton-enlace:hover { text-decoration: underline; }
+.boton-enlace:focus-visible { outline: 2px solid var(--acento); outline-offset: 2px; border-radius: 2px; }
 
 .principal { padding: 34px 44px 70px; min-width: 0; }
 
@@ -476,4 +483,19 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.5; }
 
 @media (prefers-reduced-motion: reduce) {
     * { transition: none !important; }
+}
+
+/* Bandeja de correos de la demostracion */
+.correo summary { cursor: pointer; color: var(--texto); }
+.correo summary:hover { color: var(--acento); }
+.correo-texto {
+    margin: 10px 0 2px;
+    padding: 12px 14px;
+    background: var(--superficie-2);
+    border: 1px solid var(--linea);
+    border-radius: var(--radio);
+    font-family: var(--sans);
+    font-size: 0.9em;
+    white-space: pre-wrap;
+    color: var(--texto-2);
 }
