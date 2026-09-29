@@ -3,6 +3,7 @@ from flask import (Flask, render_template, request, redirect, url_for, session,
 from flask_wtf.csrf import CSRFProtect, CSRFError
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
+from werkzeug.middleware.proxy_fix import ProxyFix
 import psycopg2
 import psycopg2.extras
 import os
@@ -32,6 +33,12 @@ def hoy_local():
     return ahora_local().date()
 
 app = Flask(__name__)
+
+# Detras del balanceador de Render, la IP del visitante llega en X-Forwarded-For.
+# Solo se confia en esa cabecera cuando hay un proxy delante (Render o
+# TRUST_PROXY=1); sin proxy, cualquiera podria falsificarla.
+if os.environ.get('RENDER') or os.environ.get('TRUST_PROXY') == '1':
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 app.secret_key = os.environ.get('SECRET_KEY')
 if not app.secret_key:
     raise RuntimeError('Falta la variable de entorno SECRET_KEY')
@@ -180,6 +187,16 @@ def _init_db(conn):
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_intentos_email ON intentos_login (email, fecha)")
 
+    # Bandeja de la demostracion: en modo demo los correos se guardan aqui en
+    # vez de enviarse, para que el visitante pueda verlos.
+    c.execute('''CREATE TABLE IF NOT EXISTS correos_demo (
+        id SERIAL PRIMARY KEY,
+        fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        destinatario TEXT NOT NULL,
+        asunto TEXT NOT NULL,
+        texto TEXT NOT NULL
+    )''')
+
     c.execute('''CREATE TABLE IF NOT EXISTS auditoria (
         id SERIAL PRIMARY KEY,
         fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -209,6 +226,11 @@ def _init_db(conn):
         "ALTER TABLE documentos ADD COLUMN IF NOT EXISTS eliminado_en TIMESTAMP",
         # 'finalizado' no existe en la interfaz: su equivalente es 'listo'
         "UPDATE documentos SET estado_caso = 'listo' WHERE estado_caso = 'finalizado'",
+        # Sube cada vez que cambia la contraseña: invalida las sesiones abiertas
+        "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS sesion_version INTEGER NOT NULL DEFAULT 0",
+        # Bloqueo por IP ademas de por correo
+        "ALTER TABLE intentos_login ADD COLUMN IF NOT EXISTS ip TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_intentos_ip ON intentos_login (ip, fecha)",
     ]
 
     # fecha_vencimiento pasa de TEXT a DATE en bases creadas antes
@@ -300,6 +322,18 @@ def login_requerido(roles_permitidos):
         def wrapper(*args, **kwargs):
             if 'usuario_id' not in session:
                 return redirect(url_for('login'))
+            # La sesion refleja la base en cada peticion: un usuario eliminado
+            # o con la contraseña cambiada sale; un cambio de rol aplica ya.
+            c = get_db().cursor()
+            c.execute("SELECT nombre, rol, sesion_version FROM usuarios WHERE id = %s",
+                      (session['usuario_id'],))
+            actual = c.fetchone()
+            if not actual or actual['sesion_version'] != session.get('sesion_version', 0):
+                session.clear()
+                flash('Tu sesión se cerró. Inicia sesión de nuevo.', 'error')
+                return redirect(url_for('login'))
+            session['rol'] = actual['rol']
+            session['usuario_nombre'] = actual['nombre']
             if session.get('rol') not in roles_permitidos:
                 flash('No tienes permiso para acceder aquí', 'error')
                 return redirect(url_for('dashboard'))
@@ -334,7 +368,10 @@ def registrar(c, accion, detalle=''):
          accion, detalle))
 
 def enviar_correo(destinatario, asunto, texto):
-    """Envia un correo por Resend. Devuelve True si salio."""
+    """Envia un correo por Resend. Devuelve True si salio.
+    En demo no se envia nada: el correo queda en la bandeja correos_demo."""
+    if MODO_DEMO:
+        return guardar_correo_demo(destinatario, asunto, texto)
     clave = os.environ.get('RESEND_API_KEY')
     if not clave:
         log.warning("Correo no enviado a %s: falta RESEND_API_KEY", destinatario)
@@ -352,6 +389,21 @@ def enviar_correo(destinatario, asunto, texto):
     except Exception as e:  # la libreria puede lanzar errores de red o de API
         log.error("Error enviando correo a %s: %s", destinatario, e)
         return False
+
+def guardar_correo_demo(destinatario, asunto, texto):
+    # Conexion propia: el registro no depende de la transaccion de quien llama
+    conn = conectar()
+    try:
+        conn.cursor().execute(
+            "INSERT INTO correos_demo (destinatario, asunto, texto) VALUES (%s, %s, %s)",
+            (destinatario, asunto, texto))
+        conn.commit()
+        return True
+    except psycopg2.Error as e:
+        log.error("No se pudo guardar el correo demo: %s", e)
+        return False
+    finally:
+        conn.close()
 
 def hash_token(token):
     return hashlib.sha256(token.encode()).hexdigest()
@@ -456,18 +508,23 @@ def index():
 # Intentos fallidos por email, guardados en PostgreSQL: sobreviven reinicios
 # y funcionan aunque haya varios workers.
 MAX_INTENTOS = 5
+# Por IP el limite es mayor: varias personas pueden salir por la misma IP
+# (una oficina). Frena a quien prueba muchas cuentas desde un mismo equipo.
+MAX_INTENTOS_IP = 20
 MINUTOS_BLOQUEO = 15
 
-def bloqueado_por_intentos(c, email):
+def bloqueado_por_intentos(c, email, ip):
     c.execute(
-        "SELECT COUNT(*) AS n FROM intentos_login "
-        "WHERE email = %s AND fecha > NOW() - make_interval(mins => %s)",
-        (email, MINUTOS_BLOQUEO))
-    return c.fetchone()['n'] >= MAX_INTENTOS
+        "SELECT COUNT(*) FILTER (WHERE email = %s) AS por_email, "
+        "       COUNT(*) FILTER (WHERE ip = %s) AS por_ip "
+        "FROM intentos_login WHERE fecha > NOW() - make_interval(mins => %s)",
+        (email, ip, MINUTOS_BLOQUEO))
+    fila = c.fetchone()
+    return fila['por_email'] >= MAX_INTENTOS or fila['por_ip'] >= MAX_INTENTOS_IP
 
-def registrar_intento_fallido(conn, email):
+def registrar_intento_fallido(conn, email, ip):
     c = conn.cursor()
-    c.execute("INSERT INTO intentos_login (email) VALUES (%s)", (email,))
+    c.execute("INSERT INTO intentos_login (email, ip) VALUES (%s, %s)", (email, ip))
     registrar(c, 'login_fallido', email)
     # Limpieza: los intentos viejos ya no cuentan
     c.execute("DELETE FROM intentos_login WHERE fecha < NOW() - make_interval(mins => %s)",
@@ -482,7 +539,8 @@ def login():
 
         conn = get_db()
         c = conn.cursor()
-        if bloqueado_por_intentos(c, email):
+        ip = request.remote_addr or ''
+        if bloqueado_por_intentos(c, email, ip):
             flash(f'Demasiados intentos fallidos. Espera {MINUTOS_BLOQUEO} minutos.', 'error')
             return render_template('login.html')
 
@@ -492,19 +550,23 @@ def login():
         if usuario and check_password_hash(usuario['password'], password):
             c.execute("DELETE FROM intentos_login WHERE email = %s", (email,))
             conn.commit()
-            session.clear()  # sesion nueva: evita fijacion de sesion
-            session.permanent = True  # aplica el vencimiento por inactividad
-            session['usuario_id'] = usuario['id']
-            session['usuario_nombre'] = usuario['nombre']
-            session['rol'] = usuario['rol']
+            abrir_sesion(usuario)
             registrar(c, 'login')
             conn.commit()
             return redirect(url_for('dashboard'))
         else:
-            registrar_intento_fallido(conn, email)
+            registrar_intento_fallido(conn, email, ip)
             flash('Email o contraseña incorrectos', 'error')
 
     return render_template('login.html')
+
+def abrir_sesion(usuario):
+    session.clear()  # sesion nueva: evita fijacion de sesion
+    session.permanent = True  # aplica el vencimiento por inactividad
+    session['usuario_id'] = usuario['id']
+    session['usuario_nombre'] = usuario['nombre']
+    session['rol'] = usuario['rol']
+    session['sesion_version'] = usuario['sesion_version']
 
 # ── Acceso rápido como invitado (sin contraseña) ──
 @app.route('/invitado/<rol>')
@@ -541,19 +603,17 @@ def entrar_invitado(rol):
     conn.close()
 
     if usuario:
-        session.clear()
-        session.permanent = True
-        session['usuario_id'] = usuario['id']
-        session['usuario_nombre'] = usuario['nombre']
-        session['rol'] = usuario['rol']
+        abrir_sesion(usuario)
         session['demo'] = True
         return redirect(url_for('dashboard'))
 
     flash('No se pudo iniciar la demostracion. Recarga la pagina.', 'error')
     return redirect(url_for('login'))
 
-@app.route('/logout')
+@app.route('/logout', methods=['POST'])
 def logout():
+    """Solo POST con token CSRF: un enlace o imagen de otro sitio no puede
+    cerrar la sesion del usuario."""
     session.clear()
     return redirect(url_for('login'))
 
@@ -702,7 +762,8 @@ def editar_usuario(id):
         try:
             if nueva_password:
                 c.execute(
-                    "UPDATE usuarios SET nombre=%s, email=%s, rol=%s, password=%s WHERE id=%s",
+                    "UPDATE usuarios SET nombre=%s, email=%s, rol=%s, password=%s, "
+                    "sesion_version = sesion_version + 1 WHERE id=%s",
                     (nombre, email, rol, generate_password_hash(nueva_password), id)
                 )
             else:
@@ -785,10 +846,13 @@ def cambiar_password():
             conn.close()
             return redirect(url_for('cambiar_password'))
 
+        # Se cierran las otras sesiones abiertas; esta sigue con la version nueva
         c.execute(
-            "UPDATE usuarios SET password = %s WHERE id = %s",
+            "UPDATE usuarios SET password = %s, sesion_version = sesion_version + 1 "
+            "WHERE id = %s RETURNING sesion_version",
             (generate_password_hash(password_nueva), session['usuario_id'])
         )
+        session['sesion_version'] = c.fetchone()['sesion_version']
         registrar(c, 'cambiar_password')
         conn.commit()
         conn.close()
@@ -1259,7 +1323,8 @@ def restablecer(token):
         if len(nueva) < MIN_PASSWORD:
             flash(f'La contraseña debe tener mínimo {MIN_PASSWORD} caracteres', 'error')
             return redirect(url_for('restablecer', token=token))
-        c.execute("UPDATE usuarios SET password = %s WHERE id = %s",
+        c.execute("UPDATE usuarios SET password = %s, sesion_version = sesion_version + 1 "
+                  "WHERE id = %s",
                   (generate_password_hash(nueva), registro['usuario_id']))
         # Se invalidan todos los enlaces pendientes de ese usuario
         c.execute("UPDATE tokens_recuperacion SET usado = TRUE WHERE usuario_id = %s",
@@ -1299,8 +1364,52 @@ def reset_alertas():
     registrar(c, 'reiniciar_alertas')
     conn.commit()
     conn.close()
-    flash('Alertas reiniciadas correctamente', 'success')
-    return redirect(url_for('superadmin_dashboard'))
+    flash('Alertas reiniciadas. Revisa los vencimientos para volver a generarlas.', 'success')
+    return redirect(url_for('correos'))
+
+# ══════════════════════════════════════════
+#  BANDEJA DE CORREOS (solo demostracion)
+# ══════════════════════════════════════════
+@app.route('/correos')
+@login_requerido(['superadmin', 'abogado'])
+def correos():
+    """El administrador ve todos los correos; el abogado solo los suyos."""
+    if not MODO_DEMO:
+        abort(404)
+    conn = get_db()
+    c = conn.cursor()
+    if session.get('rol') == 'abogado':
+        c.execute("SELECT email FROM usuarios WHERE id = %s", (session['usuario_id'],))
+        fila = c.fetchone()
+        c.execute("SELECT * FROM correos_demo WHERE destinatario = %s ORDER BY fecha DESC, id DESC",
+                  (fila['email'] if fila else '',))
+    else:
+        c.execute("SELECT * FROM correos_demo ORDER BY fecha DESC, id DESC LIMIT 200")
+    lista = c.fetchall()
+    return render_template('correos.html', correos=lista,
+                           nombre=session['usuario_nombre'])
+
+@app.route('/correos/revisar', methods=['POST'])
+@login_requerido(['superadmin'])
+def revisar_vencimientos():
+    """Ejecuta en el momento la revision que el sistema hace sola cada hora."""
+    if not MODO_DEMO:
+        abort(404)
+    c = get_db().cursor()
+    c.execute("SELECT COUNT(*) AS n FROM correos_demo")
+    antes = c.fetchone()['n']
+    enviar_alertas()
+    c = get_db().cursor()
+    c.execute("SELECT COUNT(*) AS n FROM correos_demo")
+    nuevos = c.fetchone()['n'] - antes
+    registrar(c, 'revisar_vencimientos', f'{nuevos} correo(s) generado(s)')
+    c.connection.commit()
+    if nuevos:
+        flash(f'Revisión completa: {nuevos} correo(s) nuevo(s).', 'success')
+    else:
+        flash('Revisión completa: no hay alertas pendientes. '
+              'Usa «Reiniciar alertas» para volver a generarlas.', 'success')
+    return redirect(url_for('correos'))
 
 # ══════════════════════════════════════════
 #  ALERTAS POR EMAIL
@@ -1384,6 +1493,10 @@ def _sembrar_documentos_demo(conn):
         ('PRUEBA - Escritura de compraventa', 'CLIENTE PRUEBA 05',
          'prueba-escritura.pdf', (hoy + timedelta(days=25)).strftime('%Y-%m-%d'),
          'Dato de prueba. No corresponde a ningun caso real.', 'pendiente'),
+        # Ya vencido: muestra la alerta de VENCIDO en la bandeja
+        ('PRUEBA - Tutela de salud', 'CLIENTE PRUEBA 06',
+         'prueba-tutela.pdf', (hoy - timedelta(days=3)).strftime('%Y-%m-%d'),
+         'Dato de prueba. No corresponde a ningun caso real.', 'pendiente'),
     ]
     for titulo, cliente, archivo, venc, notas, estado in ejemplos:
         try:
@@ -1417,6 +1530,7 @@ def resetear_demo():
         c.execute("DELETE FROM intentos_login")
         c.execute("DELETE FROM tokens_recuperacion")
         c.execute("DELETE FROM auditoria")
+        c.execute("DELETE FROM correos_demo")
         c.execute("DELETE FROM usuarios")
         conn.commit()
     except psycopg2.Error as e:
