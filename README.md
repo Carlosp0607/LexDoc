@@ -49,7 +49,23 @@ El módulo que más valor operativo aporta.
 3. Si la fecha ya pasó y `alerta_vencido_enviada = 0`, envía un aviso de caso vencido.
 4. Los correos salen por la API de Resend y cada registro queda marcado para no notificar dos veces. Cambiar la fecha del caso reactiva la alerta.
 
-Solo en modo demo, el panel del administrador tiene un botón **Reiniciar alertas** (ruta `/reset-alertas`) que devuelve los flags a cero. En modo real la ruta responde 404: reenviaría todas las alertas de la firma.
+### Bandeja de correos (modo demo)
+
+En la demostración los correos no se envían: se guardan en la tabla `correos_demo` y se muestran dentro de la aplicación, para que cualquier visitante pueda ver las alertas.
+
+| Rol | Pantalla | Qué ve |
+|---|---|---|
+| Administrador | **Correos enviados** | Todos los correos, con destinatario, asunto y texto completo |
+| Abogado | **Mis correos** | Solo las alertas de sus casos |
+
+El administrador tiene dos botones:
+
+- **Revisar vencimientos ahora**: ejecuta en el momento la revisión que el sistema hace sola cada hora.
+- **Reiniciar alertas** (`/reset-alertas`): devuelve los flags a cero para poder generar las alertas de nuevo.
+
+Los correos de recuperación de contraseña también llegan a la bandeja, así que el flujo de "¿Olvidaste tu contraseña?" se puede probar completo. Entre los casos de ejemplo hay uno próximo a vencer y uno vencido, para que aparezcan los dos tipos de alerta. El reinicio de cada 12 horas vacía la bandeja.
+
+En modo real nada de esto existe: la pantalla y las rutas responden 404 y los correos salen por Resend.
 
 ### Plazos en pantalla
 
@@ -81,7 +97,7 @@ Si la base de datos es nueva o quedó incompleta, la ruta crea la cuenta demo en
 
 ## Modelo de datos
 
-PostgreSQL. Seis tablas. Las dos principales, `usuarios` y `documentos`, se relacionan por `abogado_id`.
+PostgreSQL. Siete tablas. Las dos principales, `usuarios` y `documentos`, se relacionan por `abogado_id`.
 
 **usuarios**
 
@@ -121,6 +137,7 @@ PostgreSQL. Seis tablas. Las dos principales, `usuarios` y `documentos`, se rela
 | `intentos_login` | Intentos fallidos, base del bloqueo de 15 minutos |
 | `auditoria` | Quién hizo qué y cuándo |
 | `tokens_recuperacion` | Enlaces de recuperación de contraseña (hash, vencimiento, uso único) |
+| `correos_demo` | Bandeja de la demostración: correos guardados en vez de enviados |
 
 Las tablas se crean con `CREATE TABLE IF NOT EXISTS` y las columnas nuevas se agregan con `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`. El arranque es idempotente: la aplicación puede reiniciarse sobre una base existente sin romper nada ni perder datos.
 
@@ -128,7 +145,7 @@ Las tablas se crean con `CREATE TABLE IF NOT EXISTS` y las columnas nuevas se ag
 
 ## Pruebas
 
-42 pruebas con `pytest` (52 casos: dos de ellas se ejecutan con 6 valores cada una). Agrupadas:
+54 pruebas con `pytest` (64 casos: dos de ellas se ejecutan con 6 valores cada una). Agrupadas:
 
 | Grupo | Qué verifica |
 |---|---|
@@ -143,6 +160,8 @@ Las tablas se crean con `CREATE TABLE IF NOT EXISTS` y las columnas nuevas se ag
 | Reglas de negocio | `calcular_estado` con los umbrales vencido / urgente / próximo / ok |
 | Modo demo | Solo se activa con `MODO_DEMO=1`; fuera de demo se retiran las cuentas demo; el reinicio no borra si hay archivos reales ni corre fuera de demo; reiniciar alertas solo existe en demo |
 | Coherencia | Un caso listo aparece como cerrado; el comentario del abogado no se guarda como instrucción del jefe; Ver abre y Descargar descarga |
+| Sesiones | Cerrar sesión solo por POST; usuario eliminado pierde la sesión; cambio de rol inmediato; cambiar o restablecer la contraseña cierra las otras sesiones; bloqueo por IP con correos distintos |
+| Bandeja demo | En demo el correo se guarda y no llama a Resend; fuera de demo no se guarda; la revisión llena la bandeja; cada abogado ve solo sus correos; solo el administrador ejecuta la revisión; fuera de demo la bandeja no existe |
 | Configuración | `APP_URL` obligatoria fuera de demo, correo del admin desde `ADMIN_EMAIL`, fechas en hora de Colombia en Python y PostgreSQL |
 
 La central es `test_abogado_no_abre_el_caso_de_otro_abogado`: si alguien quita el `AND abogado_id = %s` de la consulta, falla antes de llegar a producción.
@@ -226,6 +245,8 @@ MODO_DEMO=0
 APP_URL=https://tu-dominio
 ```
 
+`TRUST_PROXY=1` solo si la aplicación corre detrás de un proxy distinto de Render. En Render se activa sola.
+
 `RESEND_FROM` es el remitente de los correos. Debe ser un dominio verificado en Resend; si no se define, se usa `onboarding@resend.dev`, que solo sirve para pruebas.
 
 `APP_URL` es la dirección pública que va en los enlaces de recuperación de contraseña. Es **obligatoria fuera de demo**: sin ella la aplicación no arranca, para que los enlaces nunca apunten a otro dominio. En demo, si falta, se usa `https://lexdoc.onrender.com`.
@@ -264,6 +285,7 @@ templates/
   base_acceso.html      Pantallas sin sesión
   _componentes.html     Piezas reutilizables (plazos, estados, formularios)
   login.html, recuperar.html, restablecer.html
+  correos.html          Bandeja de correos de la demostración
   superadmin/           Panel general, usuarios, auditoría, perfil y contraseña
   jefe/                 Casos, asignación, edición y papelera
   abogado/              Panel, carga y edición de casos propios
@@ -290,8 +312,11 @@ La demo corre en el plan gratuito, donde la instancia entra en reposo tras un pe
 
 - Contraseñas con hash, token CSRF en todos los formularios, cookie de sesion `HttpOnly`, `SameSite` y `Secure`.
 - La sesion vence tras 30 minutos sin actividad.
+- Cerrar sesión solo funciona por POST con token CSRF: un enlace o imagen de otro sitio no puede cerrar la sesión de nadie.
+- La sesión se valida contra la base en cada petición: si el administrador elimina a un usuario, este sale en el siguiente clic; si le cambia el rol, el nuevo rol aplica de inmediato.
+- Cambiar o restablecer la contraseña cierra las demás sesiones abiertas de ese usuario (columna `sesion_version`). Quien la cambia conserva la suya.
 - Fechas y registros en hora de Colombia. Los registros anteriores a este cambio quedaron guardados en UTC (5 horas adelante).
-- Bloqueo de 15 minutos tras 5 intentos fallidos de inicio de sesion (registrado en PostgreSQL).
+- Bloqueo de 15 minutos tras 5 intentos fallidos con el mismo correo, o 20 desde la misma IP aunque cambie el correo (registrado en PostgreSQL). En Render la IP real se lee de `X-Forwarded-For`; fuera de Render solo se confía en esa cabecera con `TRUST_PROXY=1`.
 - Politica CSP: solo se ejecuta JavaScript servido por la propia aplicacion (`static/js/lexdoc.js`).
 - Archivos validados por extension y por su firma real; guardados en PostgreSQL.
 - Registro de auditoria de cada accion (quien, que y cuando), visible para el superadmin.
