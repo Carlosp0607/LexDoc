@@ -36,6 +36,8 @@ services:
       SECRET_KEY: clave-solo-para-desarrollo-local
       # El keep alive apunta al propio contenedor, nunca a produccion
       APP_URL: http://127.0.0.1:5000
+      # Local: demostracion con cuentas de invitado y datos ficticios
+      MODO_DEMO: "1"
       HORAS_RESET_DEMO: 12
       RESEND_API_KEY: ""
     ports:
