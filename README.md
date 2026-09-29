@@ -110,7 +110,7 @@ Las tablas se crean con `CREATE TABLE IF NOT EXISTS` y las columnas nuevas se ag
 
 ## Pruebas
 
-31 pruebas con `pytest` (36 casos: una de ellas se ejecuta con 6 valores). Agrupadas:
+35 pruebas con `pytest` (45 casos: dos de ellas se ejecutan con 6 valores cada una). Agrupadas:
 
 | Grupo | Qué verifica |
 |---|---|
@@ -123,6 +123,7 @@ Las tablas se crean con `CREATE TABLE IF NOT EXISTS` y las columnas nuevas se ag
 | Seguridad web | POST sin token CSRF rechazado, eliminar no acepta GET, cabecera CSP presente |
 | Operación | Auditoría, recuperación de contraseña de un solo uso sin revelar si el correo existe, alertas próximas y vencidas, cambio de fecha reactiva la alerta |
 | Reglas de negocio | `calcular_estado` con los umbrales vencido / urgente / próximo / ok |
+| Modo demo | Solo se activa con `MODO_DEMO=1`; fuera de demo se retiran las cuentas demo; el reinicio no borra si hay archivos reales ni corre fuera de demo |
 
 La central es `test_abogado_no_abre_el_caso_de_otro_abogado`: si alguien quita el `AND abogado_id = %s` de la consulta, falla antes de llegar a producción.
 
@@ -200,7 +201,7 @@ SECRET_KEY=cadena_aleatoria_para_las_sesiones
 RESEND_API_KEY=clave_de_resend
 RESEND_FROM="LexDoc <alertas@tu-dominio>"
 ADMIN_PASSWORD=clave_del_administrador
-MODO_DEMO=1
+MODO_DEMO=0
 APP_URL=https://tu-dominio
 ```
 
@@ -208,7 +209,12 @@ APP_URL=https://tu-dominio
 
 `APP_URL` es la direccion publica que va en los enlaces de recuperacion de contraseña.
 
-`MODO_DEMO=1` (valor por defecto) activa el acceso de invitado, los datos ficticios, el reinicio periodico de la base y las descargas como PDF de prueba. Con `MODO_DEMO=0` todo eso se apaga: los archivos reales se guardan en PostgreSQL y se descargan tal cual.
+`MODO_DEMO` está **apagado por defecto**. Solo `MODO_DEMO=1` activa el acceso de invitado, los datos ficticios, el reinicio periódico de la base y las descargas como PDF de prueba. Sin la variable, o con cualquier otro valor, la aplicación corre en modo real: los archivos se guardan en PostgreSQL y se descargan tal cual.
+
+Protecciones del modo real:
+
+- Al arrancar fuera de demo se eliminan las tres cuentas demo (su clave es pública). Si alguna tiene casos asignados no se puede borrar y queda bloqueada con una clave aleatoria.
+- El reinicio de la demo no se ejecuta fuera de demo, y aunque la instancia quede en demo por error, se cancela si la base contiene archivos reales.
 
 Sin `RESEND_API_KEY` las alertas por correo no se programan. Sin `ADMIN_PASSWORD` no se crea la cuenta de administrador real.
 
