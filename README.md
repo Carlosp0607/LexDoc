@@ -32,9 +32,9 @@ La aplicación define tres perfiles. El rol se guarda en la tabla `usuarios` y d
 
 | Rol | Permisos |
 |---|---|
-| **Superadmin** | Crea, edita y elimina usuarios. Gestiona su propio perfil y contraseña. |
+| **Superadmin** | Crea, edita y elimina usuarios. Ve todos los casos activos y el registro de auditoría. Gestiona su propio perfil y contraseña. |
 | **Jefe** | Asigna casos a los abogados. Edita y elimina cualquier caso. Ve todos los procesos. |
-| **Abogado** | Sube documentos, edita los casos asignados y registra comentarios. Solo ve lo propio. |
+| **Abogado** | Sube documentos, edita los casos asignados, cambia su estado y registra comentarios para el jefe. Solo ve lo propio. |
 
 El aislamiento no es solo de interfaz: las consultas del panel de abogado filtran por `abogado_id`, así que una sesión de abogado no puede recuperar casos de otro ni cambiando la URL. Esa garantía está cubierta por pruebas automatizadas, ver la sección [Pruebas](#pruebas).
 
@@ -49,7 +49,25 @@ El módulo que más valor operativo aporta.
 3. Si la fecha ya pasó y `alerta_vencido_enviada = 0`, envía un aviso de caso vencido.
 4. Los correos salen por la API de Resend y cada registro queda marcado para no notificar dos veces. Cambiar la fecha del caso reactiva la alerta.
 
-Existe una ruta `/reset-alertas` que devuelve el flag a cero, usada para reactivar las notificaciones en el entorno de demostración.
+Solo en modo demo, el panel del administrador tiene un botón **Reiniciar alertas** (ruta `/reset-alertas`) que devuelve los flags a cero. En modo real la ruta responde 404: reenviaría todas las alertas de la firma.
+
+### Plazos en pantalla
+
+Los paneles de los tres roles usan los mismos umbrales que los correos:
+
+| Plazo | Condición |
+|---|---|
+| Vencido | La fecha ya pasó |
+| Urgente | 7 días o menos |
+| Próximo | Entre 8 y 15 días |
+| Al día | Más de 15 días |
+| Cerrado | Caso en estado `listo`, sin importar la fecha. No cuenta como vencido ni urgente y no genera alertas |
+
+Todas las fechas se calculan en hora de Colombia (`America/Bogota`), tanto en Python como en PostgreSQL, aunque el servidor corra en UTC.
+
+### Documentos
+
+**Ver** abre el PDF en el navegador; **Descargar** lo guarda en el equipo. Los archivos DOC y DOCX solo tienen la opción de descarga.
 
 ---
 
@@ -110,7 +128,7 @@ Las tablas se crean con `CREATE TABLE IF NOT EXISTS` y las columnas nuevas se ag
 
 ## Pruebas
 
-35 pruebas con `pytest` (45 casos: dos de ellas se ejecutan con 6 valores cada una). Agrupadas:
+42 pruebas con `pytest` (52 casos: dos de ellas se ejecutan con 6 valores cada una). Agrupadas:
 
 | Grupo | Qué verifica |
 |---|---|
@@ -123,7 +141,9 @@ Las tablas se crean con `CREATE TABLE IF NOT EXISTS` y las columnas nuevas se ag
 | Seguridad web | POST sin token CSRF rechazado, eliminar no acepta GET, cabecera CSP presente |
 | Operación | Auditoría, recuperación de contraseña de un solo uso sin revelar si el correo existe, alertas próximas y vencidas, cambio de fecha reactiva la alerta |
 | Reglas de negocio | `calcular_estado` con los umbrales vencido / urgente / próximo / ok |
-| Modo demo | Solo se activa con `MODO_DEMO=1`; fuera de demo se retiran las cuentas demo; el reinicio no borra si hay archivos reales ni corre fuera de demo |
+| Modo demo | Solo se activa con `MODO_DEMO=1`; fuera de demo se retiran las cuentas demo; el reinicio no borra si hay archivos reales ni corre fuera de demo; reiniciar alertas solo existe en demo |
+| Coherencia | Un caso listo aparece como cerrado; el comentario del abogado no se guarda como instrucción del jefe; Ver abre y Descargar descarga |
+| Configuración | `APP_URL` obligatoria fuera de demo, correo del admin desde `ADMIN_EMAIL`, fechas en hora de Colombia en Python y PostgreSQL |
 
 La central es `test_abogado_no_abre_el_caso_de_otro_abogado`: si alguien quita el `AND abogado_id = %s` de la consulta, falla antes de llegar a producción.
 
@@ -201,13 +221,16 @@ SECRET_KEY=cadena_aleatoria_para_las_sesiones
 RESEND_API_KEY=clave_de_resend
 RESEND_FROM="LexDoc <alertas@tu-dominio>"
 ADMIN_PASSWORD=clave_del_administrador
+ADMIN_EMAIL=admin@tu-dominio
 MODO_DEMO=0
 APP_URL=https://tu-dominio
 ```
 
 `RESEND_FROM` es el remitente de los correos. Debe ser un dominio verificado en Resend; si no se define, se usa `onboarding@resend.dev`, que solo sirve para pruebas.
 
-`APP_URL` es la direccion publica que va en los enlaces de recuperacion de contraseña.
+`APP_URL` es la dirección pública que va en los enlaces de recuperación de contraseña. Es **obligatoria fuera de demo**: sin ella la aplicación no arranca, para que los enlaces nunca apunten a otro dominio. En demo, si falta, se usa `https://lexdoc.onrender.com`.
+
+`ADMIN_EMAIL` es el correo de la cuenta de administrador que se crea con `ADMIN_PASSWORD`. Debe ser un buzón de la firma: a él llega la recuperación de contraseña. La cuenta se crea una sola vez; cambiar después `ADMIN_EMAIL` crea un segundo administrador.
 
 `MODO_DEMO` está **apagado por defecto**. Solo `MODO_DEMO=1` activa el acceso de invitado, los datos ficticios, el reinicio periódico de la base y las descargas como PDF de prueba. Sin la variable, o con cualquier otro valor, la aplicación corre en modo real: los archivos se guardan en PostgreSQL y se descargan tal cual.
 
@@ -216,7 +239,7 @@ Protecciones del modo real:
 - Al arrancar fuera de demo se eliminan las tres cuentas demo (su clave es pública). Si alguna tiene casos asignados no se puede borrar y queda bloqueada con una clave aleatoria.
 - El reinicio de la demo no se ejecuta fuera de demo, y aunque la instancia quede en demo por error, se cancela si la base contiene archivos reales.
 
-Sin `RESEND_API_KEY` las alertas por correo no se programan. Sin `ADMIN_PASSWORD` no se crea la cuenta de administrador real.
+Sin `RESEND_API_KEY` las alertas por correo no se programan. Sin `ADMIN_PASSWORD` no se crea la cuenta de administrador. Fuera de demo, `ADMIN_PASSWORD` sin `ADMIN_EMAIL` tampoco la crea y deja un error en el log.
 
 ```bash
 python app.py
@@ -230,18 +253,29 @@ Las tablas se crean solas en el primer arranque.
 
 ```
 app.py                  Rutas, lógica de negocio, esquema y alertas
+wsgi.py                 Punto de entrada para Gunicorn y tareas programadas
 Dockerfile              Imagen de la aplicación
-docker-compose.yml      Aplicación + PostgreSQL para desarrollo local
-wsgi.py                 Punto de entrada para Gunicorn
+docker-compose.yml      Aplicación + PostgreSQL para desarrollo local (modo demo)
 pytest.ini              Configuración de pytest
-requirements.txt
+requirements.txt        Dependencias con versión fija
 templates/
-  login.html
-  superadmin/           Gestión de usuarios y perfil
-  jefe/                 Asignación y edición de casos
+  base.html             Esqueleto HTML común
+  base_app.html         Menú lateral por rol y aviso de demo
+  base_acceso.html      Pantallas sin sesión
+  _componentes.html     Piezas reutilizables (plazos, estados, formularios)
+  login.html, recuperar.html, restablecer.html
+  superadmin/           Panel general, usuarios, auditoría, perfil y contraseña
+  jefe/                 Casos, asignación, edición y papelera
   abogado/              Panel, carga y edición de casos propios
+static/
+  css/lexdoc.css        Estilos
+  js/lexdoc.js          Único JavaScript de la aplicación (requisito de la CSP)
+  favicon.svg
 tests/
-  test_lexdoc.py        Pruebas de acceso por roles y aislamiento de casos
+  test_lexdoc.py        Pruebas automatizadas
+.github/workflows/
+  pruebas.yml           Pruebas en cada push
+  backup.yml            Copia de seguridad diaria cifrada
 ```
 
 ---
@@ -256,6 +290,7 @@ La demo corre en el plan gratuito, donde la instancia entra en reposo tras un pe
 
 - Contraseñas con hash, token CSRF en todos los formularios, cookie de sesion `HttpOnly`, `SameSite` y `Secure`.
 - La sesion vence tras 30 minutos sin actividad.
+- Fechas y registros en hora de Colombia. Los registros anteriores a este cambio quedaron guardados en UTC (5 horas adelante).
 - Bloqueo de 15 minutos tras 5 intentos fallidos de inicio de sesion (registrado en PostgreSQL).
 - Politica CSP: solo se ejecuta JavaScript servido por la propia aplicacion (`static/js/lexdoc.js`).
 - Archivos validados por extension y por su firma real; guardados en PostgreSQL.
