@@ -12,10 +12,24 @@ import logging
 import secrets
 import resend
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 log = logging.getLogger('lexdoc')
+
+# Toda la aplicacion trabaja en hora de Colombia. El servidor (Render) corre en
+# UTC: sin esto, entre las 7 p.m. y la medianoche el sistema ya vive en el dia
+# siguiente y los plazos quedan corridos un dia.
+ZONA_HORARIA = 'America/Bogota'
+ZONA = ZoneInfo(ZONA_HORARIA)
+
+def ahora_local():
+    """Fecha y hora de Colombia, sin zona (igual que las columnas TIMESTAMP)."""
+    return datetime.now(ZONA).replace(tzinfo=None)
+
+def hoy_local():
+    return ahora_local().date()
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY')
@@ -31,10 +45,6 @@ app.config['SESSION_COOKIE_SECURE'] = os.environ.get('RENDER') == 'true'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(minutes=30)
 app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 
-# URL publica para los enlaces de los correos (no se toma del encabezado Host,
-# que el cliente puede falsificar)
-APP_URL = os.environ.get('APP_URL', 'https://lexdoc.onrender.com').rstrip('/')
-
 # Archivos: maximo 10 MB por peticion. Se guardan en PostgreSQL, no en disco,
 # porque el disco de Render gratis se borra en cada reinicio.
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
@@ -46,6 +56,31 @@ def leer_modo_demo(entorno):
     return entorno.get('MODO_DEMO', '0').strip() == '1'
 
 MODO_DEMO = leer_modo_demo(os.environ)
+
+# URL publica para los enlaces de los correos (no se toma del encabezado Host,
+# que el cliente puede falsificar). En modo real es obligatoria: sin ella, los
+# enlaces de recuperacion de contraseña apuntarian a la demostracion.
+URL_DEMO = 'https://lexdoc.onrender.com'
+
+def leer_app_url(entorno, modo_demo):
+    url = entorno.get('APP_URL', '').strip().rstrip('/')
+    if url:
+        return url
+    if modo_demo:
+        return URL_DEMO
+    raise RuntimeError('Falta la variable de entorno APP_URL (obligatoria fuera de demo)')
+
+APP_URL = leer_app_url(os.environ, MODO_DEMO)
+
+# Correo de la cuenta de administrador que se crea con ADMIN_PASSWORD. En modo
+# real debe ser un buzon de la firma: a el llega la recuperacion de contraseña.
+EMAIL_ADMIN_DEMO = 'admin@lexdoc.com'
+
+def leer_admin_email(entorno, modo_demo):
+    email = entorno.get('ADMIN_EMAIL', '').strip().lower()
+    if email:
+        return email
+    return EMAIL_ADMIN_DEMO if modo_demo else None
 
 # Cuentas de la demostracion. Su clave es publica (README): no pueden existir
 # en una instalacion real.
@@ -81,10 +116,15 @@ def get_db():
     planificador, pruebas) abre una conexion que el llamador cierra."""
     if has_app_context():
         if 'db' not in g or g.db.closed:
-            g.db = psycopg2.connect(DATABASE_URL,
-                                    cursor_factory=psycopg2.extras.RealDictCursor)
+            g.db = conectar()
         return g.db
-    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    return conectar()
+
+def conectar():
+    # NOW() y CURRENT_TIMESTAMP devuelven hora de Colombia en esta conexion
+    return psycopg2.connect(DATABASE_URL,
+                            cursor_factory=psycopg2.extras.RealDictCursor,
+                            options=f'-c timezone={ZONA_HORARIA}')
 
 @app.teardown_appcontext
 def cerrar_db(error):
@@ -196,11 +236,15 @@ def _init_db(conn):
             log.warning("Migracion omitida: %s", e)
 
     # La clave del administrador real nunca va en el codigo: sale de ADMIN_PASSWORD
+    # y el correo de ADMIN_EMAIL. Solo se crea si ese correo aun no existe.
     admin_password = os.environ.get('ADMIN_PASSWORD')
-    if admin_password:
+    admin_email = leer_admin_email(os.environ, MODO_DEMO)
+    if admin_password and not admin_email:
+        log.error("ADMIN_PASSWORD definida sin ADMIN_EMAIL: no se crea el administrador")
+    elif admin_password:
         try:
             c.execute("INSERT INTO usuarios (nombre, email, password, rol) VALUES (%s, %s, %s, %s)",
-                ('Super Admin', 'admin@lexdoc.com',
+                ('Super Admin', admin_email,
                  generate_password_hash(admin_password), 'superadmin'))
             conn.commit()
         except psycopg2.IntegrityError:
@@ -263,11 +307,15 @@ def login_requerido(roles_permitidos):
         return wrapper
     return decorador
 
-def calcular_estado(fecha_vencimiento):
-    """Dias restantes y estado de alerta. Mismos umbrales para todos los roles."""
+def calcular_estado(fecha_vencimiento, estado_caso=None):
+    """Dias restantes y estado de alerta. Mismos umbrales para todos los roles.
+    Un caso listo queda 'cerrado': no cuenta como vencido ni urgente, igual que
+    en las alertas por correo."""
     vencimiento = datetime.strptime(str(fecha_vencimiento), '%Y-%m-%d').date()
-    dias = (vencimiento - datetime.now().date()).days
-    if dias < 0:
+    dias = (vencimiento - hoy_local()).days
+    if estado_caso == 'listo':
+        estado = 'cerrado'
+    elif dias < 0:
         estado = 'vencido'
     elif dias <= 7:
         estado = 'urgente'
@@ -343,11 +391,6 @@ def guardar_archivo(c, archivo):
                   (nombre_unico, tipo, psycopg2.Binary(contenido)))
     return nombre_unico
 
-
-# ══════════════════════════════════════════
-#  FRANJA DE AVISO DEMO (todas las paginas)
-# ══════════════════════════════════════════
-# El aviso de modo demostracion vive en templates/base_app.html y login.html
 
 MESES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
 
@@ -548,7 +591,7 @@ def superadmin_dashboard():
 
     docs_con_estado = []
     for doc in documentos:
-        estado, dias = calcular_estado(doc['fecha_vencimiento'])
+        estado, dias = calcular_estado(doc['fecha_vencimiento'], doc['estado_caso'])
         docs_con_estado.append((doc, estado, dias))
 
     return render_template('superadmin/dashboard.html',
@@ -774,7 +817,7 @@ def jefe_dashboard():
 
     docs_con_estado = []
     for doc in documentos:
-        estado, dias = calcular_estado(doc['fecha_vencimiento'])
+        estado, dias = calcular_estado(doc['fecha_vencimiento'], doc['estado_caso'])
         docs_con_estado.append((doc, estado, dias))
 
     return render_template('jefe/dashboard.html',
@@ -871,7 +914,7 @@ def jefe_editar(id):
                                      THEN alerta_vencido_enviada ELSE 0 END
                WHERE id=%s''',
             (titulo, cliente, fecha_vencimiento, notas,
-             abogado_id, datetime.now(), fecha_vencimiento, fecha_vencimiento, id)
+             abogado_id, ahora_local(), fecha_vencimiento, fecha_vencimiento, id)
         )
         registrar(c, 'editar_caso', f'#{id} {titulo} / {cliente}')
         conn.commit()
@@ -964,7 +1007,7 @@ def abogado_dashboard():
 
     docs_con_estado = []
     for doc in documentos:
-        estado, dias = calcular_estado(doc['fecha_vencimiento'])
+        estado, dias = calcular_estado(doc['fecha_vencimiento'], doc['estado_caso'])
         docs_con_estado.append((doc, estado, dias))
 
     return render_template('abogado/dashboard.html',
@@ -978,7 +1021,8 @@ def abogado_subir():
         titulo = request.form.get('titulo', '').strip()
         cliente = request.form.get('cliente', '').strip()
         fecha_vencimiento = request.form.get('fecha_vencimiento', '')
-        notas = request.form.get('notas', '')
+        # 'notas' son las instrucciones del jefe: en un caso propio no hay.
+        # Lo que escribe el abogado va como su comentario.
         comentario = request.form.get('comentario_abogado', '')
 
         if not titulo or not cliente or not fecha_valida(fecha_vencimiento):
@@ -993,11 +1037,11 @@ def abogado_subir():
             return redirect(url_for('abogado_subir'))
         c.execute(
             '''INSERT INTO documentos
-               (titulo, cliente, archivo, fecha_vencimiento, notas,
+               (titulo, cliente, archivo, fecha_vencimiento,
                 comentario_abogado, estado_caso, abogado_id, asignado_por)
-               VALUES (%s, %s, %s, %s, %s, %s, 'en_proceso', %s, %s)''',
+               VALUES (%s, %s, %s, %s, %s, 'en_proceso', %s, %s)''',
             (titulo, cliente, nombre_archivo, fecha_vencimiento,
-             notas, comentario, session['usuario_id'], session['usuario_id'])
+             comentario, session['usuario_id'], session['usuario_id'])
         )
         registrar(c, 'subir_caso', f'{titulo} / {cliente}')
         conn.commit()
@@ -1047,7 +1091,7 @@ def abogado_editar(id):
                                      THEN alerta_vencido_enviada ELSE 0 END
                WHERE id=%s''',
             (titulo, cliente, fecha_vencimiento, comentario, estado_caso,
-             datetime.now(), fecha_vencimiento, fecha_vencimiento, id)
+             ahora_local(), fecha_vencimiento, fecha_vencimiento, id)
         )
         registrar(c, 'editar_caso', f'#{id} {titulo} ({estado_caso})')
         conn.commit()
@@ -1113,7 +1157,9 @@ def generar_pdf_prueba(titulo, cliente):
 @login_requerido(['superadmin', 'jefe', 'abogado'])
 def descargar(nombre_archivo):
     """Un abogado solo puede abrir documentos de sus propios casos.
-    En demo nunca se entrega un archivo real: se genera un PDF de prueba."""
+    En demo nunca se entrega un archivo real: se genera un PDF de prueba.
+    Con ?ver=1 un PDF se abre en el navegador; sin el, se descarga."""
+    ver = request.args.get('ver') == '1'
     conn = get_db()
     c = conn.cursor()
     if session.get('rol') == 'abogado':
@@ -1132,10 +1178,11 @@ def descargar(nombre_archivo):
 
     if MODO_DEMO:
         pdf = generar_pdf_prueba(fila['titulo'], fila['cliente'])
+        modo = 'inline' if ver else 'attachment'
         return Response(
             pdf,
             mimetype='application/pdf',
-            headers={'Content-Disposition': 'inline; filename="documento-de-prueba.pdf"'}
+            headers={'Content-Disposition': f'{modo}; filename="documento-de-prueba.pdf"'}
         )
 
     c.execute("SELECT tipo, contenido FROM archivos WHERE nombre = %s", (nombre_archivo,))
@@ -1143,11 +1190,12 @@ def descargar(nombre_archivo):
     if not archivo:
         abort(404)
     nombre_original = nombre_archivo.split('_', 1)[-1]
-    # attachment: se descarga, el navegador no lo abre dentro de la app
+    # Solo un PDF se muestra en el navegador; DOC y DOCX siempre se descargan
+    modo = 'inline' if ver and archivo['tipo'] == 'application/pdf' else 'attachment'
     return Response(
         bytes(archivo['contenido']),
         mimetype=archivo['tipo'],
-        headers={'Content-Disposition': f'attachment; filename="{nombre_original}"'}
+        headers={'Content-Disposition': f'{modo}; filename="{nombre_original}"'}
     )
 
 # ══════════════════════════════════════════
@@ -1242,6 +1290,9 @@ def superadmin_auditoria():
 @app.route('/reset-alertas', methods=['POST'])
 @login_requerido(['superadmin'])
 def reset_alertas():
+    """Solo demostracion: en una instalacion real reenviaria todas las alertas."""
+    if not MODO_DEMO:
+        abort(404)
     conn = get_db()
     c = conn.cursor()
     c.execute('UPDATE documentos SET alerta_enviada = 0, alerta_vencido_enviada = 0')
@@ -1265,7 +1316,7 @@ def _enviar_alertas(conn):
     """Dos avisos por caso: uno cuando faltan 7 dias o menos, y otro cuando
     ya vencio. Los casos listos o en la papelera no generan alertas."""
     c = conn.cursor()
-    hoy = datetime.now().date()
+    hoy = hoy_local()
     limite = hoy + timedelta(days=7)
     base = '''SELECT d.id, d.titulo, d.cliente, d.fecha_vencimiento, u.email, u.nombre
               FROM documentos d JOIN usuarios u ON d.abogado_id = u.id
@@ -1316,7 +1367,7 @@ def _sembrar_documentos_demo(conn):
     f = c.fetchone()
     jefe_id = f['id'] if f else None
 
-    hoy = datetime.now()
+    hoy = ahora_local()
     ejemplos = [
         ('PRUEBA - Contrato de arrendamiento', 'CLIENTE PRUEBA 01',
          'prueba-contrato.pdf', (hoy + timedelta(days=12)).strftime('%Y-%m-%d'),
