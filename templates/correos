@@ -1,0 +1,48 @@
+{% extends 'base_app.html' %}
+{#- Ruta: templates/correos.html -#}
+{%- set es_admin = session.get('rol') == 'superadmin' -%}
+{% block titulo %}{{ 'Correos enviados' if es_admin else 'Mis correos' }}{% endblock %}
+{% block encabezado %}{{ 'Correos enviados' if es_admin else 'Mis correos' }}{% endblock %}
+{% block bajada %}<p class="bajada">
+    {%- if es_admin %}Alertas de vencimiento y recuperación de contraseña. En la demostración se guardan aquí en vez de enviarse.
+    {%- else %}Alertas que el sistema te envió por tus casos. En la demostración se guardan aquí en vez de enviarse.{% endif -%}
+</p>{% endblock %}
+{% block acciones %}
+{% if es_admin %}
+<form method="POST" action="{{ url_for('reset_alertas') }}"
+      data-confirmar="Las alertas de todos los casos se podrán generar de nuevo. ¿Continuar?">
+    {{ ui.csrf() }}
+    <button type="submit" class="boton">Reiniciar alertas</button>
+</form>
+<form method="POST" action="{{ url_for('revisar_vencimientos') }}">
+    {{ ui.csrf() }}
+    <button type="submit" class="boton boton-principal">Revisar vencimientos ahora</button>
+</form>
+{% endif %}
+{% endblock %}
+{% block contenido %}
+<div class="tabla-contenedor">
+    <table>
+        <thead><tr><th>Fecha</th>{% if es_admin %}<th>Para</th>{% endif %}<th>Asunto</th></tr></thead>
+        <tbody>
+        {% for m in correos %}
+            <tr>
+                <td class="numero sin-salto">{{ m['fecha']|fecha }} <span class="celda-secundaria">{{ m['fecha'].strftime('%H:%M') }}</span></td>
+                {% if es_admin %}<td>{{ m['destinatario'] }}</td>{% endif %}
+                <td>
+                    <details class="correo">
+                        <summary>{{ m['asunto'] }}</summary>
+                        <pre class="correo-texto">{{ m['texto'] }}</pre>
+                    </details>
+                </td>
+            </tr>
+        {% else %}
+            <tr><td colspan="{{ 3 if es_admin else 2 }}" class="vacio">
+                {%- if es_admin %}No hay correos todavía. Presiona «Revisar vencimientos ahora».
+                {%- else %}Todavía no tienes correos. El sistema revisa los vencimientos cada hora.{% endif -%}
+            </td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
