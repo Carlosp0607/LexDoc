@@ -14,6 +14,10 @@ import os
 import pytest
 from werkzeug.security import generate_password_hash
 
+# La suite corre en modo demo salvo las pruebas que lo apagan a proposito.
+# Se fija antes de importar la app porque MODO_DEMO se lee al importarla.
+os.environ.setdefault("MODO_DEMO", "1")
+
 import app as lexdoc
 
 
@@ -512,3 +516,77 @@ def test_cambiar_fecha_reactiva_la_alerta(cliente, esquema):
     assert consulta("SELECT alerta_enviada FROM documentos WHERE id = %s",
                     (caso,))["alerta_enviada"] == 0
     ejecutar("UPDATE documentos SET fecha_vencimiento = '2026-12-31' WHERE id = %s", (caso,))
+
+
+# ─────────────────────────────────────────────
+#  7. Modo demo apagado por defecto y protecciones
+# ─────────────────────────────────────────────
+
+@pytest.mark.parametrize("entorno, esperado", [
+    ({}, False), ({"MODO_DEMO": ""}, False), ({"MODO_DEMO": "0"}, False),
+    ({"MODO_DEMO": "true"}, False), ({"MODO_DEMO": "1"}, True), ({"MODO_DEMO": " 1 "}, True),
+])
+def test_modo_demo_solo_con_valor_1(entorno, esperado):
+    assert lexdoc.leer_modo_demo(entorno) is esperado
+
+
+def test_fuera_de_demo_se_retiran_cuentas_demo(esquema):
+    from werkzeug.security import check_password_hash
+    conn = lexdoc.get_db()
+    c = conn.cursor()
+    lexdoc._init_db(conn)  # corre en demo: garantiza que existan las cuentas
+    c.execute("SELECT id FROM usuarios WHERE email = %s", ("abogado.demo@lexdoc.com",))
+    abogado_demo = c.fetchone()["id"]
+    # Un caso asignado impide borrar la cuenta: debe quedar bloqueada
+    c.execute("INSERT INTO documentos (titulo, cliente, archivo, fecha_vencimiento, "
+              "abogado_id) VALUES ('x', 'CLIENTE PRUEBA', 'x.pdf', '2030-01-01', %s)",
+              (abogado_demo,))
+    conn.commit()
+
+    lexdoc.retirar_cuentas_demo(conn)
+
+    c.execute("SELECT email, password FROM usuarios WHERE email LIKE '%%.demo@lexdoc.com'")
+    restantes = {f["email"]: f["password"] for f in c.fetchall()}
+    assert "superadmin.demo@lexdoc.com" not in restantes
+    assert "jefe.demo@lexdoc.com" not in restantes
+    assert not check_password_hash(restantes["abogado.demo@lexdoc.com"], "demo123")
+
+    # Deja la base como estaba para el resto de la suite
+    c.execute("DELETE FROM documentos WHERE cliente = 'CLIENTE PRUEBA' AND titulo = 'x'")
+    conn.commit()
+    lexdoc.retirar_cuentas_demo(conn)
+    lexdoc._init_db(conn)
+    conn.close()
+
+
+def test_reinicio_de_demo_no_borra_si_hay_archivos_reales(esquema):
+    conn = lexdoc.get_db()
+    c = conn.cursor()
+    c.execute("INSERT INTO archivos (nombre, tipo, contenido) VALUES "
+              "('real_prueba.pdf', 'application/pdf', %s)", (b"%PDF-1.4",))
+    conn.commit()
+    c.execute("SELECT COUNT(*) AS n FROM usuarios")
+    antes = c.fetchone()["n"]
+    conn.close()
+
+    lexdoc.resetear_demo()
+
+    conn = lexdoc.get_db()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) AS n FROM usuarios")
+    assert c.fetchone()["n"] == antes
+    c.execute("SELECT 1 FROM usuarios WHERE id = %s", (esquema["abogado_2"],))
+    assert c.fetchone() is not None
+    c.execute("DELETE FROM archivos WHERE nombre = 'real_prueba.pdf'")
+    conn.commit()
+    conn.close()
+
+
+def test_reinicio_no_corre_fuera_de_demo(esquema, monkeypatch):
+    monkeypatch.setattr(lexdoc, "MODO_DEMO", False)
+    lexdoc.resetear_demo()
+    conn = lexdoc.get_db()
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM usuarios WHERE id = %s", (esquema["abogado_2"],))
+    assert c.fetchone() is not None
+    conn.close()
