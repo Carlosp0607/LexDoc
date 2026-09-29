@@ -258,7 +258,7 @@ def enviar_correo(destinatario, asunto, texto):
     resend.api_key = clave
     try:
         resend.Emails.send({
-            "from": "onboarding@resend.dev",
+            "from": os.environ.get('RESEND_FROM', 'LexDoc <onboarding@resend.dev>'),
             "to": [destinatario],
             "subject": asunto,
             "text": texto,
@@ -306,11 +306,6 @@ def guardar_archivo(c, archivo):
         c.execute("INSERT INTO archivos (nombre, tipo, contenido) VALUES (%s, %s, %s)",
                   (nombre_unico, tipo, psycopg2.Binary(contenido)))
     return nombre_unico
-
-def bloqueado_en_demo():
-    """Sin restricciones. Todo el sistema es una demostracion: cualquier
-    visitante puede ejecutar cualquier accion. Los datos se limpian solos."""
-    return False
 
 
 # ══════════════════════════════════════════
@@ -546,8 +541,6 @@ def superadmin_usuarios():
 @app.route('/superadmin/crear_usuario', methods=['POST'])
 @login_requerido(['superadmin'])
 def crear_usuario():
-    if bloqueado_en_demo():
-        return redirect(url_for('superadmin_usuarios'))
     nombre = request.form.get('nombre', '').strip()
     email = request.form.get('email', '').strip().lower()
     password = request.form.get('password', '')
@@ -581,8 +574,6 @@ def crear_usuario():
 @app.route('/superadmin/eliminar_usuario/<int:id>', methods=['POST'])
 @login_requerido(['superadmin'])
 def eliminar_usuario(id):
-    if bloqueado_en_demo():
-        return redirect(url_for('superadmin_usuarios'))
     conn = get_db()
     c = conn.cursor()
     try:
@@ -613,8 +604,6 @@ def editar_usuario(id):
         return redirect(url_for('superadmin_usuarios'))
 
     if request.method == 'POST':
-        if bloqueado_en_demo():
-            return redirect(url_for('superadmin_usuarios'))
         nombre = request.form.get('nombre', '').strip()
         email = request.form.get('email', '').strip().lower()
         rol = request.form.get('rol', '')
@@ -668,9 +657,6 @@ def superadmin_perfil():
     conn = get_db()
     c = conn.cursor()
     if request.method == 'POST':
-        if bloqueado_en_demo():
-            conn.close()
-            return redirect(url_for('superadmin_perfil'))
         nombre = request.form.get('nombre', '').strip()
         email = request.form.get('email', '').strip().lower()
         if not nombre or not email:
@@ -702,8 +688,6 @@ def superadmin_perfil():
 @login_requerido(['superadmin'])
 def cambiar_password():
     if request.method == 'POST':
-        if bloqueado_en_demo():
-            return redirect(url_for('cambiar_password'))
         password_actual = request.form.get('password_actual', '')
         password_nueva = request.form.get('password_nueva', '')
         password_confirmar = request.form.get('password_confirmar', '')
@@ -774,9 +758,6 @@ def jefe_asignar():
     conn = get_db()
     c = conn.cursor()
     if request.method == 'POST':
-        if bloqueado_en_demo():
-            conn.close()
-            return redirect(url_for('jefe_dashboard'))
         abogado_id = request.form.get('abogado_id')
         if not abogado_id:
             flash('Debes seleccionar un abogado', 'error')
@@ -837,9 +818,6 @@ def jefe_editar(id):
         return redirect(url_for('jefe_dashboard'))
 
     if request.method == 'POST':
-        if bloqueado_en_demo():
-            conn.close()
-            return redirect(url_for('jefe_dashboard'))
         titulo = request.form.get('titulo', '').strip()
         cliente = request.form.get('cliente', '').strip()
         fecha_vencimiento = request.form.get('fecha_vencimiento', '')
@@ -883,8 +861,6 @@ def jefe_editar(id):
 @login_requerido(['jefe'])
 def jefe_eliminar(id):
     """Envia el caso a la papelera. Se puede restaurar."""
-    if bloqueado_en_demo():
-        return redirect(url_for('jefe_dashboard'))
     conn = get_db()
     c = conn.cursor()
     c.execute("UPDATE documentos SET eliminado_en = NOW() "
@@ -969,8 +945,6 @@ def abogado_dashboard():
 @login_requerido(['abogado'])
 def abogado_subir():
     if request.method == 'POST':
-        if bloqueado_en_demo():
-            return redirect(url_for('abogado_dashboard'))
         titulo = request.form.get('titulo', '').strip()
         cliente = request.form.get('cliente', '').strip()
         fecha_vencimiento = request.form.get('fecha_vencimiento', '')
@@ -1020,9 +994,6 @@ def abogado_editar(id):
         return redirect(url_for('abogado_dashboard'))
 
     if request.method == 'POST':
-        if bloqueado_en_demo():
-            conn.close()
-            return redirect(url_for('abogado_dashboard'))
         titulo = request.form.get('titulo', '').strip()
         cliente = request.form.get('cliente', '').strip()
         fecha_vencimiento = request.form.get('fecha_vencimiento', '')
