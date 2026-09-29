@@ -210,8 +210,8 @@ def test_no_se_borra_abogado_con_casos(cliente, esquema):
     (8, "proximo"), (15, "proximo"), (16, "ok"),
 ])
 def test_calcular_estado_mismos_umbrales(dias, esperado):
-    from datetime import date, timedelta
-    fecha = date.today() + timedelta(days=dias)
+    from datetime import timedelta
+    fecha = lexdoc.hoy_local() + timedelta(days=dias)
     estado, restantes = lexdoc.calcular_estado(fecha)
     assert estado == esperado
     assert restantes == dias
@@ -482,11 +482,11 @@ def test_recuperar_no_revela_si_el_correo_existe(cliente, monkeypatch):
 
 
 def test_alertas_proximas_y_vencidas(esquema, monkeypatch):
-    from datetime import date, timedelta
+    from datetime import timedelta
     asuntos = []
     monkeypatch.setattr(lexdoc, "enviar_correo",
                         lambda destino, asunto, texto: asuntos.append(asunto) or True)
-    hoy = date.today()
+    hoy = lexdoc.hoy_local()
     for titulo, dias, estado in [("Alerta proxima", 3, "pendiente"),
                                  ("Alerta vencida", -2, "en_proceso"),
                                  ("Vencido pero listo", -2, "listo")]:
@@ -590,3 +590,88 @@ def test_reinicio_no_corre_fuera_de_demo(esquema, monkeypatch):
     c.execute("SELECT 1 FROM usuarios WHERE id = %s", (esquema["abogado_2"],))
     assert c.fetchone() is not None
     conn.close()
+
+
+# ─────────────────────────────────────────────
+#  8. Coherencia entre pantallas, correos y configuracion
+# ─────────────────────────────────────────────
+
+def test_caso_listo_queda_cerrado_aunque_este_vencido(cliente, esquema):
+    from datetime import timedelta
+    fecha = lexdoc.hoy_local() - timedelta(days=5)
+    assert lexdoc.calcular_estado(fecha, "listo") == ("cerrado", -5)
+    assert lexdoc.calcular_estado(fecha, "pendiente")[0] == "vencido"
+
+    ejecutar("INSERT INTO documentos (titulo, cliente, archivo, fecha_vencimiento, "
+             "estado_caso, abogado_id, asignado_por) "
+             "VALUES ('Caso cerrado', 'CLIENTE PRUEBA', 'x.pdf', %s, 'listo', %s, %s)",
+             (fecha, esquema["abogado_1"], esquema["jefe"]))
+    entrar(cliente, "jefe@test.local")
+    html = cliente.get("/jefe").get_data(as_text=True)
+    assert "fila-cerrado" in html and "plazo-cerrado" in html
+    ejecutar("DELETE FROM documentos WHERE titulo = 'Caso cerrado'")
+
+
+def test_abogado_subir_guarda_comentario_y_no_instrucciones(cliente):
+    entrar(cliente, "abogado1@test.local")
+    cliente.post("/abogado/subir", data={
+        "titulo": "Caso propio", "cliente": "CLIENTE PRUEBA",
+        "fecha_vencimiento": "2030-01-01", "comentario_abogado": "Revisar poder",
+        "archivo": (io.BytesIO(PDF_REAL), "propio.pdf")},
+        content_type="multipart/form-data")
+    fila = consulta("SELECT notas, comentario_abogado FROM documentos "
+                    "WHERE titulo = 'Caso propio'")
+    assert fila["comentario_abogado"] == "Revisar poder"
+    assert not fila["notas"]
+
+
+def test_ver_abre_el_pdf_y_descargar_lo_descarga(cliente, monkeypatch):
+    monkeypatch.setattr(lexdoc, "MODO_DEMO", False)
+    entrar(cliente, "abogado2@test.local")
+    cliente.post("/abogado/subir", data={
+        "titulo": "Caso ver", "cliente": "CLIENTE PRUEBA",
+        "fecha_vencimiento": "2030-01-01",
+        "archivo": (io.BytesIO(PDF_REAL), "ver.pdf")},
+        content_type="multipart/form-data")
+    nombre = consulta("SELECT archivo FROM documentos WHERE titulo = 'Caso ver'")["archivo"]
+    assert cliente.get(f"/descargar/{nombre}?ver=1").headers[
+        "Content-Disposition"].startswith("inline")
+    assert cliente.get(f"/descargar/{nombre}").headers[
+        "Content-Disposition"].startswith("attachment")
+
+
+def test_reiniciar_alertas_solo_en_demo(cliente, esquema, monkeypatch):
+    entrar(cliente, "admin@test.local")
+    caso = esquema["caso_de_abogado_2"]
+    ejecutar("UPDATE documentos SET alerta_enviada = 1 WHERE id = %s", (caso,))
+
+    monkeypatch.setattr(lexdoc, "MODO_DEMO", False)
+    assert cliente.post("/reset-alertas").status_code == 404
+    assert consulta("SELECT alerta_enviada FROM documentos WHERE id = %s",
+                    (caso,))["alerta_enviada"] == 1
+
+    monkeypatch.setattr(lexdoc, "MODO_DEMO", True)
+    assert cliente.post("/reset-alertas").status_code == 302
+    assert consulta("SELECT alerta_enviada FROM documentos WHERE id = %s",
+                    (caso,))["alerta_enviada"] == 0
+
+
+def test_app_url_obligatoria_fuera_de_demo():
+    assert lexdoc.leer_app_url({}, True) == lexdoc.URL_DEMO
+    assert lexdoc.leer_app_url({"APP_URL": "https://firma.co/"}, False) == "https://firma.co"
+    with pytest.raises(RuntimeError):
+        lexdoc.leer_app_url({}, False)
+
+
+def test_correo_del_admin_sale_de_la_variable():
+    assert lexdoc.leer_admin_email({"ADMIN_EMAIL": " Admin@Firma.co "}, False) == "admin@firma.co"
+    assert lexdoc.leer_admin_email({}, True) == lexdoc.EMAIL_ADMIN_DEMO
+    assert lexdoc.leer_admin_email({}, False) is None
+
+
+def test_fechas_en_hora_de_colombia():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    assert lexdoc.hoy_local() == datetime.now(ZoneInfo("America/Bogota")).date()
+    fila = consulta("SELECT current_setting('TimeZone') AS zona")
+    assert fila["zona"] == "America/Bogota"
