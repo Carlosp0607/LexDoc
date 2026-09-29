@@ -34,7 +34,9 @@ def esquema():
     c = conn.cursor()
 
     # Limpieza por si quedaron datos de una corrida anterior
+    c.execute("DELETE FROM intentos_login WHERE email LIKE '%@test.local' OR ip = '127.0.0.1'")
     c.execute("DELETE FROM documentos WHERE cliente = 'CLIENTE PRUEBA'")
+    c.execute("DELETE FROM correos_demo WHERE destinatario LIKE '%@test.local'")
     c.execute("DELETE FROM usuarios WHERE email LIKE '%@test.local'")
 
     def crear_usuario(nombre, email, rol):
@@ -71,6 +73,7 @@ def esquema():
     c = conn.cursor()
     c.execute("DELETE FROM documentos WHERE cliente = 'CLIENTE PRUEBA'")
     c.execute("DELETE FROM archivos WHERE nombre NOT IN (SELECT archivo FROM documentos)")
+    c.execute("DELETE FROM correos_demo WHERE destinatario LIKE '%@test.local'")
     c.execute("DELETE FROM usuarios WHERE email LIKE '%@test.local'")
     conn.commit()
     conn.close()
@@ -88,7 +91,8 @@ def cliente():
 def limpiar_intentos():
     conn = lexdoc.get_db()
     c = conn.cursor()
-    c.execute("DELETE FROM intentos_login WHERE email LIKE '%@test.local'")
+    # El cliente de pruebas siempre sale por 127.0.0.1: se limpia tambien por IP
+    c.execute("DELETE FROM intentos_login WHERE email LIKE '%@test.local' OR ip = '127.0.0.1'")
     conn.commit()
     conn.close()
 
@@ -675,3 +679,156 @@ def test_fechas_en_hora_de_colombia():
     assert lexdoc.hoy_local() == datetime.now(ZoneInfo("America/Bogota")).date()
     fila = consulta("SELECT current_setting('TimeZone') AS zona")
     assert fila["zona"] == "America/Bogota"
+
+
+# ─────────────────────────────────────────────
+#  9. Bandeja de correos de la demostracion
+# ─────────────────────────────────────────────
+
+def test_en_demo_el_correo_va_a_la_bandeja_y_no_a_resend(esquema, monkeypatch):
+    def resend_prohibido(*a, **k):
+        raise AssertionError("En demo no se debe llamar a Resend")
+    monkeypatch.setattr(lexdoc.resend.Emails, "send", resend_prohibido)
+    monkeypatch.setenv("RESEND_API_KEY", "clave-falsa")
+    assert lexdoc.enviar_correo("abogado1@test.local", "Asunto bandeja", "Texto") is True
+    fila = consulta("SELECT texto FROM correos_demo WHERE asunto = 'Asunto bandeja'")
+    assert fila["texto"] == "Texto"
+
+
+def test_fuera_de_demo_el_correo_no_va_a_la_bandeja(esquema, monkeypatch):
+    monkeypatch.setattr(lexdoc, "MODO_DEMO", False)
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    assert lexdoc.enviar_correo("abogado1@test.local", "Asunto real", "Texto") is False
+    assert consulta("SELECT 1 FROM correos_demo WHERE asunto = 'Asunto real'") is None
+
+
+def test_revisar_vencimientos_llena_la_bandeja_y_cada_abogado_ve_lo_suyo(cliente, esquema):
+    from datetime import timedelta
+    ejecutar("INSERT INTO documentos (titulo, cliente, archivo, fecha_vencimiento, "
+             "estado_caso, abogado_id, asignado_por) "
+             "VALUES ('Caso bandeja', 'CLIENTE PRUEBA', 'x.pdf', %s, 'pendiente', %s, %s)",
+             (lexdoc.hoy_local() + timedelta(days=2), esquema["abogado_1"], esquema["jefe"]))
+
+    entrar(cliente, "admin@test.local")
+    assert cliente.post("/correos/revisar").status_code == 302
+    html = cliente.get("/correos").get_data(as_text=True)
+    assert "Documento por vencer: Caso bandeja" in html
+    assert "abogado1@test.local" in html
+
+    entrar(cliente, "abogado1@test.local")
+    assert "Caso bandeja" in cliente.get("/correos").get_data(as_text=True)
+    entrar(cliente, "abogado2@test.local")
+    assert "Caso bandeja" not in cliente.get("/correos").get_data(as_text=True)
+
+
+def test_abogado_no_puede_ejecutar_la_revision(cliente, esquema):
+    entrar(cliente, "abogado1@test.local")
+    respuesta = cliente.post("/correos/revisar")
+    assert respuesta.status_code == 302
+    assert "/correos" not in respuesta.headers["Location"]
+
+
+def test_bandeja_no_existe_fuera_de_demo(cliente, esquema, monkeypatch):
+    monkeypatch.setattr(lexdoc, "MODO_DEMO", False)
+    entrar(cliente, "admin@test.local")
+    assert cliente.get("/correos").status_code == 404
+    assert cliente.post("/correos/revisar").status_code == 404
+    assert "Correos enviados" not in cliente.get("/superadmin").get_data(as_text=True)
+
+
+# ─────────────────────────────────────────────
+#  10. Sesiones: cierre por POST y reflejo inmediato de la base
+# ─────────────────────────────────────────────
+
+def usuario_temporal(email, rol="abogado"):
+    from werkzeug.security import generate_password_hash
+    return ejecutar("INSERT INTO usuarios (nombre, email, password, rol) VALUES "
+                    "('Temporal', %s, %s, %s) RETURNING id",
+                    (email, generate_password_hash("clave123"), rol))["id"]
+
+
+def sesion_activa(cliente):
+    with cliente.session_transaction() as sesion:
+        return "usuario_id" in sesion
+
+
+def test_cerrar_sesion_solo_por_post(cliente):
+    entrar(cliente, "abogado1@test.local")
+    assert cliente.get("/logout").status_code == 405
+    assert sesion_activa(cliente)
+    cliente.post("/logout")
+    assert not sesion_activa(cliente)
+
+
+def test_usuario_eliminado_pierde_la_sesion(cliente):
+    id_temp = usuario_temporal("temporal1@test.local")
+    entrar(cliente, "temporal1@test.local")
+    assert cliente.get("/abogado").status_code == 200
+    ejecutar("DELETE FROM usuarios WHERE id = %s", (id_temp,))
+    respuesta = cliente.get("/abogado")
+    assert "/login" in respuesta.headers["Location"]
+    assert not sesion_activa(cliente)
+
+
+def test_cambio_de_rol_aplica_en_la_siguiente_peticion(cliente):
+    id_temp = usuario_temporal("temporal2@test.local")
+    entrar(cliente, "temporal2@test.local")
+    assert cliente.get("/abogado").status_code == 200
+    ejecutar("UPDATE usuarios SET rol = 'jefe' WHERE id = %s", (id_temp,))
+    assert cliente.get("/jefe").status_code == 200
+    assert cliente.get("/abogado").status_code == 302  # ya no es abogado
+    ejecutar("DELETE FROM usuarios WHERE id = %s", (id_temp,))
+
+
+def test_admin_cambia_la_clave_y_cierra_la_sesion_del_usuario(cliente):
+    id_temp = usuario_temporal("temporal3@test.local")
+    entrar(cliente, "temporal3@test.local")
+
+    admin = lexdoc.app.test_client()
+    entrar(admin, "admin@test.local")
+    admin.post(f"/superadmin/editar_usuario/{id_temp}", data={
+        "nombre": "Temporal", "email": "temporal3@test.local",
+        "rol": "abogado", "password": "otraclave123"})
+
+    assert "/login" in cliente.get("/abogado").headers["Location"]
+    ejecutar("DELETE FROM usuarios WHERE id = %s", (id_temp,))
+
+
+def test_cambiar_mi_clave_mantiene_esta_sesion_y_cierra_las_otras(cliente):
+    usuario_temporal("temporal4@test.local", rol="superadmin")
+    otra = lexdoc.app.test_client()
+    entrar(cliente, "temporal4@test.local")
+    entrar(otra, "temporal4@test.local")
+
+    cliente.post("/superadmin/cambiar_password", data={
+        "password_actual": "clave123", "password_nueva": "nuevaclave123",
+        "password_confirmar": "nuevaclave123"})
+
+    assert cliente.get("/superadmin").status_code == 200
+    assert "/login" in otra.get("/superadmin").headers["Location"]
+    ejecutar("DELETE FROM usuarios WHERE email = 'temporal4@test.local'")
+
+
+def test_restablecer_clave_cierra_las_sesiones(cliente):
+    id_temp = usuario_temporal("temporal5@test.local")
+    entrar(cliente, "temporal5@test.local")
+    token = "token-de-prueba-sesiones"
+    ejecutar("INSERT INTO tokens_recuperacion (usuario_id, token_hash, expira) "
+             "VALUES (%s, %s, NOW() + INTERVAL '10 minutes')",
+             (id_temp, lexdoc.hash_token(token)))
+    lexdoc.app.test_client().post(f"/restablecer/{token}", data={
+        "password_nueva": "nuevaclave123", "password_confirmar": "nuevaclave123"})
+    assert "/login" in cliente.get("/abogado").headers["Location"]
+    ejecutar("DELETE FROM usuarios WHERE id = %s", (id_temp,))
+
+
+def test_bloqueo_por_ip_tras_muchos_intentos_con_correos_distintos(cliente):
+    try:
+        for i in range(lexdoc.MAX_INTENTOS_IP):
+            entrar(cliente, f"inexistente{i}@test.local", password="mala")
+        entrar(cliente, "abogado1@test.local")  # cuenta y clave correctas, IP bloqueada
+        assert not sesion_activa(cliente)
+    finally:
+        limpiar_intentos()
+    entrar(cliente, "abogado1@test.local")
+    assert sesion_activa(cliente)
