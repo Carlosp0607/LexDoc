@@ -1,4 +1,4 @@
-from app import app, init_db, resetear_demo, enviar_alertas, MODO_DEMO
+from app import app, init_db, resetear_demo, enviar_alertas, MODO_DEMO, APP_URL
 from apscheduler.schedulers.background import BackgroundScheduler
 import requests
 import os
@@ -7,8 +7,6 @@ import logging
 log = logging.getLogger('lexdoc')
 
 init_db()
-
-APP_URL = os.environ.get('APP_URL', 'https://lexdoc.onrender.com')
 
 # Cada cuantas horas vuelve la demostracion a su estado inicial.
 HORAS_RESET = int(os.environ.get('HORAS_RESET_DEMO', '12'))
