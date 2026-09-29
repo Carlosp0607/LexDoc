@@ -3,12 +3,21 @@
 {% block titulo %}Panel general{% endblock %}
 {% block encabezado %}Panel general{% endblock %}
 {% block bajada %}<p class="bajada">Todos los casos activos de la firma.</p>{% endblock %}
+{% block acciones %}
+{% if modo_demo %}
+<form method="POST" action="{{ url_for('reset_alertas') }}"
+      data-confirmar="Las alertas por correo de todos los casos se volverán a enviar. ¿Continuar?">
+    {{ ui.csrf() }}
+    <button type="submit" class="boton">Reiniciar alertas</button>
+</form>
+{% endif %}
+{% endblock %}
 
 {% block contenido %}
 {%- set cuenta = namespace(vencidos=0, semana=0) -%}
 {%- for doc, estado, dias in documentos -%}
-    {%- if dias < 0 %}{% set cuenta.vencidos = cuenta.vencidos + 1 %}
-    {%- elif dias <= 7 %}{% set cuenta.semana = cuenta.semana + 1 %}{% endif -%}
+    {%- if estado == 'vencido' %}{% set cuenta.vencidos = cuenta.vencidos + 1 %}
+    {%- elif estado == 'urgente' %}{% set cuenta.semana = cuenta.semana + 1 %}{% endif -%}
 {%- endfor -%}
 <div class="resumen">
     <div><strong>{{ documentos|length }}</strong><span>Casos activos</span></div>
@@ -43,7 +52,7 @@
                     <td>{{ ui.estado_caso(doc['estado_caso']) }}</td>
                     <td>
                         <div class="acciones-fila">
-                            <a class="boton boton-chico" href="{{ url_for('descargar', nombre_archivo=doc['archivo']) }}" target="_blank" rel="noopener">Ver</a>
+                            {% if doc['archivo'].lower().endswith('.pdf') %}<a class="boton boton-chico" href="{{ url_for('descargar', nombre_archivo=doc['archivo'], ver=1) }}" target="_blank" rel="noopener">Ver</a>{% endif %}
                             <a class="boton boton-chico" href="{{ url_for('descargar', nombre_archivo=doc['archivo']) }}" download>Descargar</a>
                         </div>
                     </td>
