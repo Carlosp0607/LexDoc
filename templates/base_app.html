@@ -6,11 +6,14 @@
 {%- set rol_actual = session.get('rol') -%}
 {%- if rol_actual == 'superadmin' -%}
     {%- set menu = [('superadmin_dashboard', 'Panel general'), ('superadmin_usuarios', 'Usuarios'),
-                    ('superadmin_auditoria', 'Auditoría'), ('superadmin_perfil', 'Mi perfil')] -%}
+                    ('superadmin_auditoria', 'Auditoría')]
+                   + ([('correos', 'Correos enviados')] if modo_demo else [])
+                   + [('superadmin_perfil', 'Mi perfil')] -%}
 {%- elif rol_actual == 'jefe' -%}
     {%- set menu = [('jefe_dashboard', 'Casos'), ('jefe_asignar', 'Asignar caso'), ('jefe_papelera', 'Papelera')] -%}
 {%- else -%}
-    {%- set menu = [('abogado_dashboard', 'Mis casos'), ('abogado_subir', 'Subir documento')] -%}
+    {%- set menu = [('abogado_dashboard', 'Mis casos'), ('abogado_subir', 'Subir documento')]
+                   + ([('correos', 'Mis correos')] if modo_demo else []) -%}
 {%- endif -%}
 {#- Cada pantalla puede declarar que opcion del menu queda marcada -#}
 {%- set marcado = seccion if seccion is defined else request.endpoint -%}
@@ -25,7 +28,10 @@
         <div class="usuario-sesion">
             <strong>{{ session.get('usuario_nombre', '') }}</strong>
             <span>{{ ui.rol(rol_actual) }}</span>
-            <a href="{{ url_for('logout') }}">Cerrar sesión</a>
+            <form method="POST" action="{{ url_for('logout') }}">
+                {{ ui.csrf() }}
+                <button type="submit" class="boton-enlace">Cerrar sesión</button>
+            </form>
         </div>
     </aside>
 
