@@ -44,10 +44,10 @@ El aislamiento no es solo de interfaz: las consultas del panel de abogado filtra
 
 El módulo que más valor operativo aporta.
 
-1. Una tarea en segundo plano (APScheduler) consulta los documentos cuyo `fecha_vencimiento` cae dentro de los próximos 7 días.
-2. Filtra los que aún tienen `alerta_enviada = 0`, para no notificar dos veces el mismo caso.
-3. Envía un correo al abogado responsable a través de la API de Resend, con el título del documento, el cliente y la fecha.
-4. Marca el registro como notificado.
+1. Cada hora, una tarea en segundo plano (APScheduler) revisa los casos activos que no están en estado `listo`.
+2. Si `fecha_vencimiento` cae en los próximos 7 días y `alerta_enviada = 0`, envía un aviso de vencimiento próximo.
+3. Si la fecha ya pasó y `alerta_vencido_enviada = 0`, envía un aviso de caso vencido.
+4. Los correos salen por la API de Resend y cada registro queda marcado para no notificar dos veces. Cambiar la fecha del caso reactiva la alerta.
 
 Existe una ruta `/reset-alertas` que devuelve el flag a cero, usada para reactivar las notificaciones en el entorno de demostración.
 
@@ -63,7 +63,7 @@ Si la base de datos es nueva o quedó incompleta, la ruta crea la cuenta demo en
 
 ## Modelo de datos
 
-PostgreSQL. Dos tablas relacionadas por `abogado_id`.
+PostgreSQL. Seis tablas. Las dos principales, `usuarios` y `documentos`, se relacionan por `abogado_id`.
 
 **usuarios**
 
@@ -83,15 +83,26 @@ PostgreSQL. Dos tablas relacionadas por `abogado_id`.
 | `titulo` | TEXT NOT NULL | |
 | `cliente` | TEXT NOT NULL | |
 | `archivo` | TEXT NOT NULL | Nombre del archivo almacenado |
-| `fecha_vencimiento` | TEXT | Base de las alertas |
+| `fecha_vencimiento` | DATE NOT NULL | Base de las alertas |
 | `notas` | TEXT | |
 | `comentario_abogado` | TEXT | Seguimiento del responsable |
-| `estado_caso` | TEXT | Por defecto `pendiente` |
-| `abogado_id` | INTEGER | Abogado asignado |
+| `estado_caso` | TEXT | `pendiente` (defecto), `en_proceso`, `listo`, `requiere_revision` |
+| `abogado_id` | INTEGER FK | Abogado asignado. `ON DELETE RESTRICT`: no se borra un abogado con casos |
 | `asignado_por` | INTEGER | Quién hizo la asignación |
 | `fecha_subida` | TIMESTAMP | |
 | `fecha_actualizacion` | TIMESTAMP | |
-| `alerta_enviada` | INTEGER | Evita correos duplicados |
+| `alerta_enviada` | INTEGER | Aviso de 7 días ya enviado |
+| `alerta_vencido_enviada` | INTEGER | Aviso de vencido ya enviado |
+| `eliminado_en` | TIMESTAMP | Fecha de envío a papelera. `NULL` = activo |
+
+**Tablas de soporte**
+
+| Tabla | Uso |
+|---|---|
+| `archivos` | Contenido binario de los documentos (`BYTEA`) |
+| `intentos_login` | Intentos fallidos, base del bloqueo de 15 minutos |
+| `auditoria` | Quién hizo qué y cuándo |
+| `tokens_recuperacion` | Enlaces de recuperación de contraseña (hash, vencimiento, uso único) |
 
 Las tablas se crean con `CREATE TABLE IF NOT EXISTS` y las columnas nuevas se agregan con `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`. El arranque es idempotente: la aplicación puede reiniciarse sobre una base existente sin romper nada ni perder datos.
 
@@ -99,19 +110,21 @@ Las tablas se crean con `CREATE TABLE IF NOT EXISTS` y las columnas nuevas se ag
 
 ## Pruebas
 
-Siete pruebas automatizadas con `pytest` cubren lo que sostiene el sistema:
+31 pruebas con `pytest` (36 casos: una de ellas se ejecuta con 6 valores). Agrupadas:
 
-| Prueba | Qué verifica |
+| Grupo | Qué verifica |
 |---|---|
-| Sin sesión no se entra a rutas protegidas | `/jefe`, `/abogado` y `/superadmin` redirigen al login |
-| Contraseña incorrecta no abre sesión | Autenticación |
-| Login correcto guarda el rol | La sesión queda con el rol del usuario |
-| Un abogado no entra a rutas de jefe | El decorador `login_requerido` |
-| Un abogado sí entra a su propio panel | Contraparte de la anterior |
-| **Un abogado no abre el caso de otro abogado** | El filtro `WHERE id = %s AND abogado_id = %s` |
-| Un abogado no ve casos ajenos en su panel | El listado también filtra |
+| Acceso por rol | Sin sesión se redirige al login; un abogado no entra a rutas de jefe pero sí a su panel |
+| Aislamiento de casos | Un abogado no abre, no lista y no descarga casos de otro abogado |
+| Autenticación | Contraseña incorrecta, bloqueo tras 5 intentos, intentos registrados en la base, vencimiento de sesión |
+| Usuarios | No se crea otro superadmin, el superadmin no se elimina, no se borra un abogado con casos |
+| Casos | Fechas inválidas rechazadas, estado `listo` aceptado, papelera (eliminar, restaurar, borrado definitivo) |
+| Archivos | Extensión falsa rechazada; fuera de demo se guarda y descarga el archivo real |
+| Seguridad web | POST sin token CSRF rechazado, eliminar no acepta GET, cabecera CSP presente |
+| Operación | Auditoría, recuperación de contraseña de un solo uso sin revelar si el correo existe, alertas próximas y vencidas, cambio de fecha reactiva la alerta |
+| Reglas de negocio | `calcular_estado` con los umbrales vencido / urgente / próximo / ok |
 
-La sexta es la central. Si alguien quita ese `AND` de la consulta, la prueba falla y lo señala antes de que llegue a producción.
+La central es `test_abogado_no_abre_el_caso_de_otro_abogado`: si alguien quita el `AND abogado_id = %s` de la consulta, falla antes de llegar a producción.
 
 Requieren una base PostgreSQL accesible. Para levantar una desechable:
 
@@ -185,10 +198,13 @@ Variables de entorno requeridas:
 DATABASE_URL=postgresql://usuario:clave@host:5432/basededatos
 SECRET_KEY=cadena_aleatoria_para_las_sesiones
 RESEND_API_KEY=clave_de_resend
+RESEND_FROM="LexDoc <alertas@tu-dominio>"
 ADMIN_PASSWORD=clave_del_administrador
 MODO_DEMO=1
 APP_URL=https://tu-dominio
 ```
+
+`RESEND_FROM` es el remitente de los correos. Debe ser un dominio verificado en Resend; si no se define, se usa `onboarding@resend.dev`, que solo sirve para pruebas.
 
 `APP_URL` es la direccion publica que va en los enlaces de recuperacion de contraseña.
 
