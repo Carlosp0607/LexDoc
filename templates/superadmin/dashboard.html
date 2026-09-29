@@ -3,15 +3,6 @@
 {% block titulo %}Panel general{% endblock %}
 {% block encabezado %}Panel general{% endblock %}
 {% block bajada %}<p class="bajada">Todos los casos activos de la firma.</p>{% endblock %}
-{% block acciones %}
-{% if modo_demo %}
-<form method="POST" action="{{ url_for('reset_alertas') }}"
-      data-confirmar="Las alertas por correo de todos los casos se volverán a enviar. ¿Continuar?">
-    {{ ui.csrf() }}
-    <button type="submit" class="boton">Reiniciar alertas</button>
-</form>
-{% endif %}
-{% endblock %}
 
 {% block contenido %}
 {%- set cuenta = namespace(vencidos=0, semana=0) -%}
