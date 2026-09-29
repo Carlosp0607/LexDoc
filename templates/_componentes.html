@@ -10,12 +10,12 @@
 {% endmacro %}
 
 {% macro plazo(estado) %}
-    {%- set textos = {'vencido': 'Vencido', 'urgente': 'Urgente', 'proximo': 'Próximo', 'ok': 'Al día'} -%}
+    {%- set textos = {'vencido': 'Vencido', 'urgente': 'Urgente', 'proximo': 'Próximo', 'ok': 'Al día', 'cerrado': 'Cerrado'} -%}
     <span class="plazo plazo-{{ estado }}">{{ textos.get(estado, estado) }}</span>
 {%- endmacro %}
 
 {% macro dias(d, estado) %}
-    {%- set clase = 'dias-vencido' if d < 0 else ('dias-urgente' if estado == 'urgente' else '') -%}
+    {%- set clase = '' if estado == 'cerrado' else ('dias-vencido' if d < 0 else ('dias-urgente' if estado == 'urgente' else '')) -%}
     <span class="dias {{ clase }}">
     {%- if d < 0 %}Hace {{ -d }} {{ 'día' if d == -1 else 'días' }}
     {%- elif d == 0 %}Vence hoy
