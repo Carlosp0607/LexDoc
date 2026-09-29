@@ -39,9 +39,21 @@ APP_URL = os.environ.get('APP_URL', 'https://lexdoc.onrender.com').rstrip('/')
 # porque el disco de Render gratis se borra en cada reinicio.
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
 
-# Modo demostracion: activo salvo que MODO_DEMO=0. En demo hay acceso de
+# Modo demostracion: apagado salvo que MODO_DEMO=1. En demo hay acceso de
 # invitado, datos ficticios, reinicio periodico y las descargas son PDF de prueba.
-MODO_DEMO = os.environ.get('MODO_DEMO', '1') != '0'
+# Apagado por defecto: olvidar la variable nunca debe exponer ni borrar datos reales.
+def leer_modo_demo(entorno):
+    return entorno.get('MODO_DEMO', '0').strip() == '1'
+
+MODO_DEMO = leer_modo_demo(os.environ)
+
+# Cuentas de la demostracion. Su clave es publica (README): no pueden existir
+# en una instalacion real.
+DEMO_EMAILS = {
+    'superadmin': 'superadmin.demo@lexdoc.com',
+    'jefe': 'jefe.demo@lexdoc.com',
+    'abogado': 'abogado.demo@lexdoc.com',
+}
 
 # Token CSRF en todos los formularios POST
 csrf = CSRFProtect(app)
@@ -194,6 +206,10 @@ def _init_db(conn):
         except psycopg2.IntegrityError:
             conn.rollback()
 
+    # Fuera de demo, las cuentas demo que hayan quedado de antes se retiran
+    if not MODO_DEMO:
+        retirar_cuentas_demo(conn)
+
     # ── Usuarios demo para acceso de invitado (solo en modo demo) ──
     usuarios_demo = [] if not MODO_DEMO else [
         ('Super Admin Demo', 'superadmin.demo@lexdoc.com', 'demo123', 'superadmin'),
@@ -209,6 +225,26 @@ def _init_db(conn):
             conn.rollback()
 
     conn.commit()
+
+def retirar_cuentas_demo(conn):
+    """Borra las cuentas demo. Si una tiene casos asignados no se puede borrar
+    (llave foranea): se le pone una clave aleatoria que nadie conoce."""
+    c = conn.cursor()
+    for email in DEMO_EMAILS.values():
+        c.execute("SELECT id FROM usuarios WHERE email = %s", (email,))
+        fila = c.fetchone()
+        if not fila:
+            continue
+        try:
+            c.execute("DELETE FROM usuarios WHERE id = %s", (fila['id'],))
+            conn.commit()
+            log.warning("Cuenta demo eliminada: %s", email)
+        except psycopg2.IntegrityError:
+            conn.rollback()
+            c.execute("UPDATE usuarios SET password = %s WHERE id = %s",
+                      (generate_password_hash(secrets.token_urlsafe(32)), fila['id']))
+            conn.commit()
+            log.warning("Cuenta demo con casos, bloqueada: %s", email)
 
 # ══════════════════════════════════════════
 #  HELPERS
@@ -428,12 +464,6 @@ def login():
     return render_template('login.html')
 
 # ── Acceso rápido como invitado (sin contraseña) ──
-DEMO_EMAILS = {
-    'superadmin': 'superadmin.demo@lexdoc.com',
-    'jefe': 'jefe.demo@lexdoc.com',
-    'abogado': 'abogado.demo@lexdoc.com',
-}
-
 @app.route('/invitado/<rol>')
 def entrar_invitado(rol):
     if not MODO_DEMO:
@@ -1318,8 +1348,18 @@ def _sembrar_documentos_demo(conn):
 
 def resetear_demo():
     """Devuelve la demostracion a su estado inicial."""
+    if not MODO_DEMO:
+        return
     conn = get_db()
     c = conn.cursor()
+    # Seguro: en demo nunca se guardan archivos. Si la tabla tiene alguno, hay
+    # datos reales y la instancia quedo en demo por error. No se borra nada.
+    c.execute("SELECT COUNT(*) AS n FROM archivos")
+    if c.fetchone()['n'] > 0:
+        conn.close()
+        log.error("Reinicio de demo cancelado: la base tiene archivos reales. "
+                  "Revisar la variable MODO_DEMO.")
+        return
     try:
         c.execute("DELETE FROM documentos")
         c.execute("DELETE FROM archivos")
