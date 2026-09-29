@@ -246,6 +246,7 @@ tr.fila-vencido td:first-child { box-shadow: inset 3px 0 0 var(--vencido-barra);
 tr.fila-urgente td:first-child { box-shadow: inset 3px 0 0 var(--urgente-barra); }
 tr.fila-proximo td:first-child { box-shadow: inset 3px 0 0 var(--proximo-barra); }
 tr.fila-ok td:first-child { box-shadow: inset 3px 0 0 var(--al-dia-barra); }
+tr.fila-cerrado td:first-child { box-shadow: inset 3px 0 0 var(--linea-fuerte); }
 
 .celda-principal { font-weight: 500; }
 .sin-salto { white-space: nowrap; }
@@ -277,6 +278,7 @@ tr.fila-ok td:first-child { box-shadow: inset 3px 0 0 var(--al-dia-barra); }
 .plazo-urgente { background: var(--urgente-fondo); color: var(--urgente); }
 .plazo-proximo { background: var(--proximo-fondo); color: var(--proximo); }
 .plazo-ok { background: var(--al-dia-fondo); color: var(--al-dia); }
+.plazo-cerrado { background: var(--superficie-2); color: var(--texto-3); border: 1px solid var(--linea); }
 
 /* Estado del trabajo del abogado: punto de color + texto */
 .estado { display: inline-flex; align-items: center; gap: 7px; font-size: 0.9rem; white-space: nowrap; }
