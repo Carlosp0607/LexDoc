@@ -28,7 +28,8 @@ if MODO_DEMO:
 
 # Alertas por correo: solo si hay clave de Resend configurada.
 # El flag alerta_enviada evita repetir el correo de un mismo caso.
-if os.environ.get('RESEND_API_KEY'):
+# En demo corre siempre: los correos van a la bandeja, no a Resend
+if MODO_DEMO or os.environ.get('RESEND_API_KEY'):
     scheduler.add_job(enviar_alertas, 'interval', hours=1)
     log.info("Alertas por correo activas (cada hora)")
 
