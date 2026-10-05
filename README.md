@@ -2,9 +2,7 @@
 
 ![Pruebas](https://github.com/Carlosp0607/lexdoc/actions/workflows/pruebas.yml/badge.svg)
 
-Sistema de gestión y asignación de casos jurídicos para firmas de abogados. Control de acceso por roles, gestión documental y alertas automáticas por correo antes del vencimiento de un proceso.
-
-Desarrollado bajo contrato de prestación de servicios para Turizo Lawyers Enterprise S.A. (enero 2024 – mayo 2025).
+Desarrollado en prestación de servicios para Turizo Lawyers Enterprise S.A. (enero 2024 – mayo 2025).Desarrollado bajo contrato de prestación de servicios para Turizo Lawyers Enterprise S.A. (enero 2024 – mayo 2025).
 
 **Demo funcional:** [lexdoc.onrender.com](https://lexdoc.onrender.com)
 
