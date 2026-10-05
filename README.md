@@ -2,6 +2,8 @@
 
 ![Pruebas](https://github.com/Carlosp0607/lexdoc/actions/workflows/pruebas.yml/badge.svg)
 
+Enfoque: backend en Python, control de acceso, tareas programadas y pruebas automatizadas.
+
 Desarrollado en prestación de servicios para Turizo Lawyers Enterprise S.A. (enero 2024 – mayo 2025).
 
 **Demo funcional:** [lexdoc.onrender.com](https://lexdoc.onrender.com)
