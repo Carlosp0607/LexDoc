@@ -505,6 +505,18 @@ def index():
         return redirect(url_for('login'))
     return redirect(url_for('dashboard'))
 
+@app.route('/salud')
+def salud():
+    """Estado del servicio y de la conexion a PostgreSQL, sin requerir sesion."""
+    try:
+        c = get_db().cursor()
+        c.execute("SELECT 1 AS ok")
+        c.fetchone()
+    except Exception:
+        logging.exception("salud: falla la base de datos")
+        return {"estado": "error"}, 503
+    return {"estado": "ok"}, 200
+
 # Intentos fallidos por email, guardados en PostgreSQL: sobreviven reinicios
 # y funcionan aunque haya varios workers.
 MAX_INTENTOS = 5
