@@ -20,6 +20,10 @@ USER aplicacion
 
 EXPOSE 5000
 
+# Comprueba cada 30 s que la app responde y llega a la base de datos.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/salud', timeout=3).status == 200 else 1)"
+
 # wsgi:app carga la aplicacion y el planificador de alertas y de reinicio
 # de la demostracion. Un solo worker: el planificador no debe duplicarse.
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "wsgi:app"]
