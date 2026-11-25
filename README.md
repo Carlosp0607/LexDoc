@@ -310,6 +310,7 @@ La demo corre en el plan gratuito, donde la instancia entra en reposo tras un pe
 
 ## Seguridad y operacion
 
+- `/salud` devuelve el estado del servicio y de la conexion a la base de datos (200 o 503), sin requerir sesion. El contenedor lo usa como `HEALTHCHECK`.
 - Contraseñas con hash, token CSRF en todos los formularios, cookie de sesion `HttpOnly`, `SameSite` y `Secure`.
 - La sesion vence tras 30 minutos sin actividad.
 - Cerrar sesión solo funciona por POST con token CSRF: un enlace o imagen de otro sitio no puede cerrar la sesión de nadie.
