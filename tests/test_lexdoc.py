@@ -832,3 +832,22 @@ def test_bloqueo_por_ip_tras_muchos_intentos_con_correos_distintos(cliente):
         limpiar_intentos()
     entrar(cliente, "abogado1@test.local")
     assert sesion_activa(cliente)
+
+
+# ─────────────────────────────────────────────
+#  Salud del servicio
+# ─────────────────────────────────────────────
+
+def test_salud_responde_ok_sin_sesion(cliente):
+    r = cliente.get("/salud")
+    assert r.status_code == 200
+    assert r.get_json() == {"estado": "ok"}
+
+
+def test_salud_devuelve_503_si_la_base_falla(cliente, monkeypatch):
+    def falla():
+        raise RuntimeError("base caida")
+    monkeypatch.setattr(lexdoc, "get_db", falla)
+    r = cliente.get("/salud")
+    assert r.status_code == 503
+    assert r.get_json() == {"estado": "error"}
